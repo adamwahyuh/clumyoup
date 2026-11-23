@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { DatePicker } from "@/components/date-picker";
 import { ThemeToggle } from "@/components/theme-toggle";
+// Read at build time from VERSION in the project root, the single place the version is written
+import version from "../VERSION?raw";
 import { TimePicker } from "@/components/time-picker";
 import { VideoRow, type Dims, type Done, type Video } from "@/components/video-row";
 import { parseMetadata, toStandard } from "@/lib/parse";
@@ -257,6 +259,7 @@ export default function App() {
           <h1 className="truncate text-lg font-semibold tracking-tight">{dir.split(/[\\/]/).pop()}</h1>
           <p className="truncate text-xs text-muted-foreground">{dir}</p>
         </div>
+        <span className="text-xs text-muted-foreground tabular-nums" title="Clumyoup version">{version.trim()}</span>
         <ThemeToggle />
         {!yt.has_client ? (
           <Button variant="outline" onClick={addClientSecret}>Add client_secret.json</Button>

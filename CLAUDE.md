@@ -18,7 +18,7 @@ Desktop app to bulk-schedule YouTube uploads from a folder. Opened from a termin
    ===
    <description>
    ```
-   Parser: `src/lib/parse.ts` (toleran: `ep`/`Ep`/`Episode`, `=` 3+, baris kosong).
+   Parser: `src/lib/parse.ts` mendeteksi format otomatis: **standard** (`---` / `ep:` / `title:` / `---` / deskripsi, rekomendasi), **loose** (format di atas, toleran `ep`/`Ep`/`Episode`, `=` 3+, baris kosong), **JSON**, dan **CSV** (`ep,title,description`). `toStandard()` dipakai untuk tombol Convert to standard.
 2. Arrange: episode tetap urut, video di-drag (tukar) atau pakai tombol naik/turun sampai cocok. Urutan awal = waktu file dibuat.
 3. Jadwal: tanggal mulai, N video per hari, N jam (`src/lib/schedule.ts`), zona waktu lokal komputer.
 4. State per folder disimpan di `<folder>/.clumyoup.json` (metadata, urutan nama file, jadwal, `uploaded`: nama file -> video ID + waktu publish). Video yang sudah ter-upload dikunci di barisnya dan tidak di-upload ulang.

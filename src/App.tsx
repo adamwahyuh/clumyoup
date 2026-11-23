@@ -7,7 +7,8 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { DatePicker } from "@/components/date-picker";
 import { TimePicker } from "@/components/time-picker";
 import { VideoRow, type Dims, type Done, type Video } from "@/components/video-row";
-import { parseMetadata } from "@/lib/parse";
+import { parseMetadata, toStandard } from "@/lib/parse";
+import { FORMAT_NAMES, FormatGuide } from "@/components/format-guide";
 import { scheduleSlots } from "@/lib/schedule";
 import { addDays, startOfToday, toDateString } from "@/lib/calendar";
 
@@ -42,6 +43,8 @@ export default function App() {
   const [dir, setDir] = useState<string | null>(null);
   const [videos, setVideos] = useState<Video[]>([]);
   const [metadata, setMetadata] = useState("");
+  // text before "Convert to standard", so it can be undone
+  const [beforeConvert, setBeforeConvert] = useState<string | null>(null);
   const [start, setStart] = useState(tomorrow);
   const [times, setTimes] = useState(["09:00"]);
   const [visibility, setVisibility] = useState<Visibility>("schedule");
@@ -116,7 +119,8 @@ export default function App() {
     return () => clearTimeout(t);
   }, [dir, loaded, metadata, videos, start, times, visibility, madeForKids, uploaded]);
 
-  const episodes = useMemo(() => parseMetadata(metadata), [metadata]);
+  const parsed = useMemo(() => parseMetadata(metadata), [metadata]);
+  const episodes = parsed.episodes;
   const rows = Math.max(episodes.length, videos.length);
   const scheduling = visibility === "schedule";
   const slots = useMemo(() => scheduleSlots(rows, start, times), [rows, start, times]);
@@ -127,6 +131,7 @@ export default function App() {
   const blockers: string[] = [];
   if (!yt.connected) blockers.push("Connect YouTube first.");
   if (episodes.length !== videos.length) blockers.push("Every video needs exactly one episode.");
+  if (parsed.error) blockers.push("Fix the episode text so it can be read.");
   if (problemCount) blockers.push("Fix the episodes marked in red.");
   if (scheduling && pending.some((i) => !slots[i] || slots[i]!.getTime() <= now)) {
     blockers.push("Every publish time must be in the future.");
@@ -278,15 +283,18 @@ export default function App() {
             <section className="space-y-2">
               <div className="flex items-center justify-between">
                 <label htmlFor="metadata" className="font-medium">Episodes</label>
-                <Button variant="ghost" size="sm" onClick={() => txtInput.current?.click()}>Load .txt</Button>
+                <Button variant="ghost" size="sm" onClick={() => txtInput.current?.click()}>Load file</Button>
                 <input
                   ref={txtInput}
                   type="file"
-                  accept=".txt,text/plain"
+                  accept=".txt,.md,.json,.csv,text/plain,application/json,text/csv"
                   hidden
                   onChange={async (e) => {
                     const file = e.target.files?.[0];
-                    if (file) setMetadata(await file.text());
+                    if (file) {
+                      setMetadata(await file.text());
+                      setBeforeConvert(null);
+                    }
                     e.target.value = "";
                   }}
                 />
@@ -294,15 +302,55 @@ export default function App() {
               <textarea
                 id="metadata"
                 value={metadata}
-                onChange={(e) => setMetadata(e.target.value)}
-                placeholder={"Ep 1\nTitle\n===\nDescription\n\nEp 2\n..."}
+                onChange={(e) => {
+                  setMetadata(e.target.value);
+                  setBeforeConvert(null);
+                }}
+                placeholder={"---\nep: 1\ntitle: Title\n---\nDescription\n\n---\nep: 2\n..."}
                 spellCheck={false}
                 className="h-44 w-full resize-y rounded-lg border border-input bg-background p-2.5 font-mono text-xs leading-relaxed outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
               />
-              <p className="text-xs text-muted-foreground">
-                {episodes.length} {episodes.length === 1 ? "episode" : "episodes"} found
-                {problemCount > 0 && <span className="text-destructive">, {problemCount} need fixing</span>}
-              </p>
+              {parsed.error ? (
+                <p role="alert" className="text-xs text-destructive">{parsed.error}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {episodes.length} {episodes.length === 1 ? "episode" : "episodes"} found
+                  {metadata.trim() && <> in {FORMAT_NAMES[parsed.format]} format</>}
+                  {problemCount > 0 && <span className="text-destructive">, {problemCount} need fixing</span>}
+                </p>
+              )}
+              <div className="flex items-center gap-3">
+                <FormatGuide current={parsed.format} />
+                {beforeConvert !== null ? (
+                  <Button
+                    variant="link"
+                    size="xs"
+                    className="h-auto px-0 text-xs"
+                    onClick={() => {
+                      setMetadata(beforeConvert);
+                      setBeforeConvert(null);
+                    }}
+                  >
+                    Undo convert
+                  </Button>
+                ) : (
+                  parsed.format !== "standard" &&
+                  episodes.length > 0 &&
+                  !parsed.error && (
+                    <Button
+                      variant="link"
+                      size="xs"
+                      className="h-auto px-0 text-xs"
+                      onClick={() => {
+                        setBeforeConvert(metadata);
+                        setMetadata(toStandard(episodes));
+                      }}
+                    >
+                      Convert to standard
+                    </Button>
+                  )
+                )}
+              </div>
             </section>
 
             <section className="space-y-2">

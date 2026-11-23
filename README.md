@@ -28,14 +28,21 @@ Limits to know:
 - While the app is in "Testing" on Google, the sign-in lasts 7 days.
 - Until your Google Cloud project passes YouTube's API audit, uploaded videos stay private.
 
-## Metadata format
+## Episode formats
+
+Paste or load any of these; the format is recognized from the text. **Formats** in the app shows a copyable example of each, and **Convert to standard** rewrites any of them into the standard one.
+
+Standard (recommended):
 
 ```
-Ep 1
-Title of episode one
-===
+---
+ep: 1
+title: Title of episode one
+---
 Description, any number of lines.
-
-Ep 2
-...
 ```
+
+Also accepted:
+- `Ep 1` / title / `===` / description
+- JSON: `[{ "ep": 1, "title": "...", "description": "..." }]`
+- CSV with columns `ep,title,description` (comma or semicolon)

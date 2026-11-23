@@ -134,15 +134,19 @@ export default function App() {
     refreshYt();
   }
 
+  // If Google blocks sign-in on its own page the browser never comes back, so a retry starts a
+  // fresh attempt and the abandoned one (which times out by itself) is ignored.
+  const connectAttempt = useRef(0);
   async function connect() {
+    const attempt = ++connectAttempt.current;
     setConnecting(true);
+    setError("");
     try {
       await invoke("connect");
-      setError("");
     } catch (e) {
-      setError(String(e));
+      if (attempt === connectAttempt.current) setError(String(e));
     } finally {
-      setConnecting(false);
+      if (attempt === connectAttempt.current) setConnecting(false);
       refreshYt();
     }
   }
@@ -229,9 +233,12 @@ export default function App() {
         {!yt.has_client ? (
           <Button variant="outline" onClick={addClientSecret}>Add client_secret.json</Button>
         ) : !yt.connected ? (
-          <Button variant="outline" onClick={connect} disabled={connecting}>
-            {connecting ? "Waiting for Google sign-in…" : "Connect YouTube"}
-          </Button>
+          <>
+            {connecting && <span className="text-sm text-muted-foreground">Finish signing in in your browser.</span>}
+            <Button variant="outline" onClick={connect}>
+              {connecting ? "Try again" : "Connect YouTube"}
+            </Button>
+          </>
         ) : (
           <span className="flex items-center gap-1 text-sm text-muted-foreground">
             <CircleCheck className="size-4 text-green-600 dark:text-green-500" /> YouTube connected

@@ -26,6 +26,12 @@ Desktop app to bulk-schedule YouTube uploads from a folder. Opened from a termin
 6. Visibilitas per folder: Scheduled (private + `publishAt`, otomatis public), Public, Unlisted, Private. API YouTube hanya bisa menjadwalkan video private. Made for kids juga per folder.
 7. Shorts: tidak ada flag di API. App memberi peringatan kalau video horizontal atau lebih dari 3 menit.
 
+## Versi & rilis
+
+- `VERSION` di root adalah versi yang tampil di header (dibaca saat build lewat `?raw`).
+- Push tag `vX.Y.Z` menjalankan `.github/workflows/release.yml`: di runner saja (tidak di-commit) `VERSION` dan `version` di `tauri.conf.json` diganti dari tag, lalu `tauri-action` membuat release berisi `.dmg` (universal) dan installer Windows. Tag harus persis `vX.Y.Z` (MSI menolak prerelease).
+- Build tidak di-sign (tanpa Apple Developer ID / sertifikat Windows).
+
 ## Rencana
 
 - [x] Langkah 1: parser, layar arrange, preview jadwal

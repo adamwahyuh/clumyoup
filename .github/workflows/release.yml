@@ -1,0 +1,73 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the installers and publishes them as a GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One .dmg that runs on both Apple Silicon and Intel Macs
+          - os: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - os: windows-latest
+            args: ''
+            rust-targets: ''
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag is a version
+        # Windows installers (MSI) only accept plain x.y.z numbers
+        run: '[[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag must look like v1.2.3, got $GITHUB_REF_NAME"; exit 1; }'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+      - run: npm test
+
+      # Only on the runner, never committed: the header shows the tag, and the installers carry its number.
+      - name: Version from tag
+        run: |
+          echo "$GITHUB_REF_NAME" > VERSION
+          node -e '
+            const fs = require("fs"), f = "src-tauri/tauri.conf.json";
+            const conf = JSON.parse(fs.readFileSync(f, "utf8"));
+            conf.version = process.argv[1];
+            fs.writeFileSync(f, JSON.stringify(conf, null, 2));
+          ' "${GITHUB_REF_NAME#v}"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Clumyoup ${{ github.ref_name }}
+          releaseBody: |
+            **macOS:** download the `.dmg`, open it and drag Clumyoup to Applications. The app is not signed with an Apple Developer ID, so on first launch macOS blocks it: open System Settings > Privacy & Security and click **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Clumyoup.app`.
+
+            **Windows:** download the `.exe` (or `.msi`) installer. SmartScreen may warn that the app is unrecognized: click **More info > Run anyway**.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

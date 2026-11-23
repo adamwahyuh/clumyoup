@@ -36,6 +36,6 @@ Desktop app to bulk-schedule YouTube uploads from a folder. Opened from a termin
 
 - [x] Langkah 1: parser, layar arrange, preview jadwal
 - [x] Langkah 2: login Google (OAuth desktop) + upload resumable di Rust, `privacyStatus: private` + `publishAt`, `selfDeclaredMadeForKids: false`, progres di `.clumyoup.json` supaya bisa lanjut saat kuota habis (~6 upload/hari)
-- [x] Langkah 3: launcher `clumyoup` di PATH + `install.sh` (macOS: app ke ~/Applications, perintah ke ~/.local/bin)
+- [x] Langkah 3: launcher `clumyoup` di PATH + `install.sh` (macOS: app ke /Applications (fallback ~/Applications), perintah ke ~/.local/bin)
 
 Catatan: project API YouTube yang belum lolos audit akan mengunci video jadi private.

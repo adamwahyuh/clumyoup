@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseMetadata } from "./parse.ts";
 import { scheduleSlots } from "./schedule.ts";
+import { monthGrid } from "./calendar.ts";
 
 const sample = `Ep 1
 
@@ -55,4 +56,13 @@ test("schedule: 2 per day over 5 days, crossing month end", () => {
   );
   assert.equal(scheduleSlots(1, "", ["03:00"])[0], null);
   assert.equal(scheduleSlots(1, "2026-12-01", [""])[0], null);
+});
+
+test("month grid starts on Monday and covers the month", () => {
+  // December 2026 starts on a Tuesday
+  const g = monthGrid(2026, 11);
+  assert.equal(g.length, 42);
+  assert.deepEqual([g[0].getMonth(), g[0].getDate(), g[0].getDay()], [10, 30, 1]);
+  assert.deepEqual([g[1].getMonth(), g[1].getDate()], [11, 1]);
+  assert.ok(g.some((d) => d.getMonth() === 11 && d.getDate() === 31));
 });

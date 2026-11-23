@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CircleCheck, FolderOpen, TriangleAlert } from "lucide-react";
+import { CircleCheck, FolderOpen, Minus, Plus, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { DatePicker } from "@/components/date-picker";
+import { TimePicker } from "@/components/time-picker";
 import { VideoRow, type Dims, type Done, type Video } from "@/components/video-row";
 import { parseMetadata } from "@/lib/parse";
 import { scheduleSlots } from "@/lib/schedule";
+import { addDays, startOfToday, toDateString } from "@/lib/calendar";
 
 type Visibility = "schedule" | "public" | "unlisted" | "private";
 type Saved = {
@@ -29,9 +31,7 @@ const VISIBILITY: { value: Visibility; label: string; help: string }[] = [
   { value: "private", label: "Private", help: "Only you can watch until you change it in YouTube Studio." },
 ];
 
-const pad = (n: number) => String(n).padStart(2, "0");
-const toDateInput = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const tomorrow = () => toDateInput(new Date(Date.now() + 864e5));
+const tomorrow = () => toDateString(addDays(startOfToday(), 1));
 const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const fullFmt = new Intl.DateTimeFormat(undefined, {
   weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
@@ -349,32 +349,42 @@ export default function App() {
             {scheduling && (
               <section className="space-y-3">
                 <h2 className="font-medium">Schedule</h2>
+                <div className="space-y-1">
+                  <label htmlFor="first-day" className="text-xs text-muted-foreground">First day</label>
+                  <DatePicker id="first-day" value={start} onChange={setStart} days={groups.length} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <p id="per-day" className="text-sm">Videos per day</p>
+                  <div role="group" aria-labelledby="per-day" className="flex items-center rounded-lg border bg-background">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="One less per day"
+                      disabled={times.length <= 1}
+                      onClick={() => setPerDay(times.length - 1)}
+                    >
+                      <Minus />
+                    </Button>
+                    <span className="w-8 text-center font-semibold tabular-nums" aria-live="polite">{times.length}</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="One more per day"
+                      disabled={times.length >= 24}
+                      onClick={() => setPerDay(times.length + 1)}
+                    >
+                      <Plus />
+                    </Button>
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <label className="space-y-1 text-xs text-muted-foreground">
-                    First day
-                    <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} className="bg-background" />
-                  </label>
-                  <label className="space-y-1 text-xs text-muted-foreground">
-                    Videos per day
-                    <Input
-                      type="number"
-                      min={1}
-                      max={24}
-                      value={times.length}
-                      onChange={(e) => setPerDay(+e.target.value)}
-                      className="bg-background"
-                    />
-                  </label>
                   {times.map((t, i) => (
-                    <label key={i} className="space-y-1 text-xs text-muted-foreground">
-                      {times.length === 1 ? "Time" : `Video ${i + 1} of the day`}
-                      <Input
-                        type="time"
-                        value={t}
-                        onChange={(e) => setTimes((ts) => ts.map((x, j) => (j === i ? e.target.value : x)))}
-                        className="bg-background"
-                      />
-                    </label>
+                    <TimePicker
+                      key={i}
+                      label={times.length === 1 ? "Time" : `Video ${i + 1} of the day`}
+                      value={t}
+                      onChange={(v) => setTimes((ts) => ts.map((x, j) => (j === i ? v : x)))}
+                    />
                   ))}
                 </div>
                 {rows > 0 && lastSlot && (

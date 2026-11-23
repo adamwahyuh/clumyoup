@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Manager};
 
+mod youtube;
+
 const STATE_FILE: &str = ".clumyoup.json";
 const VIDEO_EXTS: [&str; 7] = ["mp4", "mov", "m4v", "webm", "mkv", "avi", "wmv"];
 
@@ -75,7 +77,19 @@ fn save_state(dir: String, json: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start_dir, scan_folder, load_state, save_state])
+        .plugin(tauri_plugin_opener::init())
+        .manage(youtube::Session::default())
+        .invoke_handler(tauri::generate_handler![
+            start_dir,
+            scan_folder,
+            load_state,
+            save_state,
+            youtube::youtube_status,
+            youtube::set_client_secret,
+            youtube::connect,
+            youtube::disconnect,
+            youtube::upload_video,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

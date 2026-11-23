@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowDown, ArrowUp, FolderOpen, GripVertical, TriangleAlert } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ArrowDown, ArrowUp, CircleCheck, FolderOpen, GripVertical, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -9,7 +10,25 @@ import { parseMetadata } from "@/lib/parse";
 import { scheduleSlots } from "@/lib/schedule";
 
 type Video = { name: string; path: string; created: number };
-type Saved = { metadata?: string; order?: string[]; start?: string; times?: string[] };
+type Saved = {
+  metadata?: string;
+  order?: string[];
+  start?: string;
+  times?: string[];
+  /** file name -> what was scheduled on YouTube, so a re-run never uploads the same file twice */
+  uploaded?: Record<string, Scheduled>;
+};
+type Scheduled = { id: string; at: string };
+type Dims = { w: number; h: number; d: number };
+type YtStatus = { has_client: boolean; connected: boolean };
+
+// YouTube treats a video as a Short when it is vertical or square and at most 3 minutes long.
+function shortsWarning(dims?: Dims) {
+  if (!dims) return null;
+  if (dims.w > dims.h) return "Horizontal video, YouTube will not show it as a Short";
+  if (dims.d > 180) return "Longer than 3 minutes, YouTube will not show it as a Short";
+  return null;
+}
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const toDateInput = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -27,6 +46,12 @@ export default function App() {
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [dropTarget, setDropTarget] = useState<number | null>(null);
+  const [uploaded, setUploaded] = useState<Record<string, Scheduled>>({});
+  const [dims, setDims] = useState<Record<string, Dims>>({});
+  const [yt, setYt] = useState<YtStatus>({ has_client: false, connected: false });
+  const [connecting, setConnecting] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<{ name: string; pct: number } | null>(null);
   const dragFrom = useRef<number | null>(null);
   const txtInput = useRef<HTMLInputElement>(null);
 
@@ -50,6 +75,7 @@ export default function App() {
       setMetadata(saved.metadata ?? "");
       setStart(saved.start ?? tomorrow());
       setTimes(saved.times?.length ? saved.times : ["09:00"]);
+      setUploaded(saved.uploaded ?? {});
       setLoaded(true);
     } catch (e) {
       setError(`Could not open ${path}: ${e}`);
@@ -65,25 +91,104 @@ export default function App() {
     invoke<string | null>("start_dir").then((d) => {
       if (d) openDir(d);
     });
+    refreshYt();
   }, []);
 
   useEffect(() => {
     if (!dir || !loaded) return;
-    const json = JSON.stringify({ metadata, order: videos.map((v) => v.name), start, times }, null, 2);
+    const state: Saved = { metadata, order: videos.map((v) => v.name), start, times, uploaded };
+    const json = JSON.stringify(state, null, 2);
     const t = setTimeout(() => {
       invoke("save_state", { dir, json }).catch((e) => setError(`Could not save .clumyoup.json: ${e}`));
     }, 300);
     return () => clearTimeout(t);
-  }, [dir, loaded, metadata, videos, start, times]);
+  }, [dir, loaded, metadata, videos, start, times, uploaded]);
 
   const episodes = useMemo(() => parseMetadata(metadata), [metadata]);
   const rows = Math.max(episodes.length, videos.length);
   const slots = useMemo(() => scheduleSlots(rows, start, times), [rows, start, times]);
   const problemCount = episodes.filter((e) => e.problems.length).length;
   const now = Date.now();
+  const pending = videos.flatMap((v, i) => (uploaded[v.name] ? [] : [i]));
+
+  const blockers: string[] = [];
+  if (!yt.connected) blockers.push("Connect YouTube first.");
+  if (episodes.length !== videos.length) blockers.push("Every video needs exactly one episode.");
+  if (problemCount) blockers.push("Fix the episodes marked in red.");
+  if (pending.some((i) => !slots[i] || slots[i]!.getTime() <= now)) blockers.push("Every publish time must be in the future.");
+  if (videos.length && !pending.length) blockers.push("Every video in this folder is already scheduled.");
+
+  async function refreshYt() {
+    setYt(await invoke<YtStatus>("youtube_status"));
+  }
+
+  async function addClientSecret() {
+    const path = await open({ filters: [{ name: "Google OAuth client", extensions: ["json"] }] });
+    if (typeof path !== "string") return;
+    try {
+      await invoke("set_client_secret", { path });
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
+    refreshYt();
+  }
+
+  async function connect() {
+    setConnecting(true);
+    try {
+      await invoke("connect");
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setConnecting(false);
+      refreshYt();
+    }
+  }
+
+  async function disconnect() {
+    await invoke("disconnect").catch((e) => setError(String(e)));
+    refreshYt();
+  }
+
+  async function uploadAll() {
+    setUploading(true);
+    setError("");
+    try {
+      for (const i of pending) {
+        const video = videos[i];
+        const ep = episodes[i];
+        const slot = slots[i]!;
+        if (slot.getTime() <= Date.now()) throw new Error(`Ep ${ep.ep}'s publish time has already passed.`);
+        setProgress({ name: video.name, pct: 0 });
+        const onProgress = new Channel<number>();
+        onProgress.onmessage = (pct) => setProgress({ name: video.name, pct });
+        const id = await invoke<string>("upload_video", {
+          path: video.path,
+          title: ep.title,
+          description: ep.description,
+          publishAt: slot.toISOString(),
+          onProgress,
+        });
+        setUploaded((u) => ({ ...u, [video.name]: { id, at: slot.toISOString() } }));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg.startsWith("QUOTA:") ? msg.slice(6).trim() : `Upload stopped: ${msg}`);
+      refreshYt();
+    } finally {
+      setUploading(false);
+      setProgress(null);
+    }
+  }
+
+  // Scheduled videos keep their title on YouTube, so they stay on their row.
+  const locked = (i: number) => uploading || !videos[i] || !!uploaded[videos[i].name];
 
   function swap(a: number, b: number) {
     if (a === b || a < 0 || b < 0 || a >= videos.length || b >= videos.length) return;
+    if (locked(a) || locked(b)) return;
     setVideos((v) => {
       const next = [...v];
       [next[a], next[b]] = [next[b], next[a]];
@@ -121,14 +226,27 @@ export default function App() {
           <h1 className="truncate font-semibold">{dir.split(/[\\/]/).pop()}</h1>
           <p className="truncate text-xs text-muted-foreground">{dir}</p>
         </div>
-        <Button variant="outline" onClick={pickDir}>
+        {!yt.has_client ? (
+          <Button variant="outline" onClick={addClientSecret}>Add client_secret.json</Button>
+        ) : !yt.connected ? (
+          <Button variant="outline" onClick={connect} disabled={connecting}>
+            {connecting ? "Waiting for Google sign-in…" : "Connect YouTube"}
+          </Button>
+        ) : (
+          <span className="flex items-center gap-1 text-sm text-muted-foreground">
+            <CircleCheck className="size-4 text-green-600 dark:text-green-500" /> YouTube connected
+            <Button variant="ghost" size="sm" onClick={disconnect} disabled={uploading}>Disconnect</Button>
+          </span>
+        )}
+        <Button variant="outline" onClick={pickDir} disabled={uploading}>
           <FolderOpen /> Open folder
         </Button>
       </header>
       {error && <p className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p>}
 
       <div className="grid min-h-0 flex-1 grid-cols-[360px_1fr]">
-        <aside className="space-y-6 overflow-y-auto border-r p-4">
+        <aside className="flex flex-col overflow-y-auto border-r">
+          <fieldset disabled={uploading} className="flex-1 space-y-6 p-4">
           <section className="space-y-2">
             <div className="flex items-center justify-between">
               <label htmlFor="metadata" className="text-sm font-medium">Titles and descriptions</label>
@@ -189,6 +307,18 @@ export default function App() {
               </p>
             )}
           </section>
+          </fieldset>
+
+          <section className="sticky bottom-0 space-y-2 border-t bg-background p-4">
+            <Button size="lg" className="w-full" onClick={uploadAll} disabled={uploading || blockers.length > 0}>
+              {uploading
+                ? `Uploading ${videos.length - pending.length + 1} of ${videos.length}…`
+                : `Schedule ${pending.length} ${pending.length === 1 ? "video" : "videos"} on YouTube`}
+            </Button>
+            {!uploading && blockers.map((b) => (
+              <p key={b} className="text-xs text-muted-foreground">{b}</p>
+            ))}
+          </section>
         </aside>
 
         <main className="overflow-y-auto">
@@ -207,12 +337,16 @@ export default function App() {
               {Array.from({ length: rows }, (_, i) => {
                 const ep = episodes[i];
                 const video = videos[i];
-                const slot = slots[i];
+                const done = video && uploaded[video.name];
+                const slot = done ? new Date(done.at) : slots[i];
+                const passed = !done && slot && slot.getTime() <= now;
+                const uploadingThis = progress && video?.name === progress.name;
+                const shorts = video && shortsWarning(dims[video.name]);
                 return (
                   <li
                     key={i}
                     onDragOver={(e) => {
-                      if (dragFrom.current === null || !video) return;
+                      if (dragFrom.current === null || locked(i)) return;
                       e.preventDefault();
                       setDropTarget(i);
                     }}
@@ -236,11 +370,12 @@ export default function App() {
                       {ep?.problems.map((p) => (
                         <p key={p} className="text-xs text-destructive">{p}</p>
                       ))}
+                      {shorts && <p className="text-xs text-amber-700 dark:text-amber-400">{shorts}</p>}
                     </div>
 
                     {video ? (
                       <div
-                        draggable
+                        draggable={!locked(i)}
                         onDragStart={(e) => {
                           dragFrom.current = i;
                           e.dataTransfer.effectAllowed = "move";
@@ -249,9 +384,12 @@ export default function App() {
                           dragFrom.current = null;
                           setDropTarget(null);
                         }}
-                        className="flex cursor-grab items-center gap-2 rounded-lg border bg-card p-1.5 active:cursor-grabbing"
+                        className={cn(
+                          "flex items-center gap-2 rounded-lg border bg-card p-1.5",
+                          !locked(i) && "cursor-grab active:cursor-grabbing",
+                        )}
                       >
-                        <GripVertical className="size-4 shrink-0 text-muted-foreground" />
+                        <GripVertical className={cn("size-4 shrink-0 text-muted-foreground", locked(i) && "invisible")} />
                         <video
                           src={`${convertFileSrc(video.path)}#t=0.1`}
                           muted
@@ -261,6 +399,10 @@ export default function App() {
                           aria-label={`Preview of ${video.name}`}
                           onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
                           onMouseLeave={(e) => e.currentTarget.pause()}
+                          onLoadedMetadata={(e) => {
+                            const { videoWidth: w, videoHeight: h, duration: d } = e.currentTarget;
+                            setDims((all) => ({ ...all, [video.name]: { w, h, d } }));
+                          }}
                           className="h-20 w-[45px] shrink-0 rounded bg-black object-cover"
                         />
                         <span className="min-w-0 break-all text-xs">{video.name}</span>
@@ -269,22 +411,29 @@ export default function App() {
                       <span className="text-xs text-muted-foreground">No video</span>
                     )}
 
-                    <span
-                      className={cn(
-                        "text-xs tabular-nums",
-                        slot && slot.getTime() <= now ? "text-destructive" : "text-muted-foreground",
-                      )}
-                    >
+                    <div className={cn("text-xs tabular-nums", passed ? "text-destructive" : "text-muted-foreground")}>
                       {slot ? fmt.format(slot) : "Set a date and time"}
-                      {slot && slot.getTime() <= now && <><br />Already passed</>}
-                    </span>
+                      {passed && <p>Already passed</p>}
+                      {uploadingThis && (
+                        <p className="text-foreground">Uploading {Math.floor(progress.pct * 100)}%</p>
+                      )}
+                      {done && (
+                        <button
+                          type="button"
+                          onClick={() => openUrl(`https://studio.youtube.com/video/${done.id}/edit`)}
+                          className="flex items-center gap-1 rounded text-green-700 underline-offset-2 hover:underline focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none dark:text-green-500"
+                        >
+                          <CircleCheck className="size-3.5" /> Scheduled, open in Studio
+                        </button>
+                      )}
+                    </div>
 
                     <div className="flex flex-col">
                       <Button
                         variant="ghost"
                         size="icon-xs"
                         aria-label={`Move ${video?.name} up`}
-                        disabled={!video || i === 0}
+                        disabled={locked(i) || i === 0 || locked(i - 1)}
                         onClick={() => swap(i, i - 1)}
                       >
                         <ArrowUp />
@@ -293,7 +442,7 @@ export default function App() {
                         variant="ghost"
                         size="icon-xs"
                         aria-label={`Move ${video?.name} down`}
-                        disabled={!video || i >= videos.length - 1}
+                        disabled={locked(i) || i >= videos.length - 1 || locked(i + 1)}
                         onClick={() => swap(i, i + 1)}
                       >
                         <ArrowDown />

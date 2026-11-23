@@ -1,41 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { ArrowDown, ArrowUp, CircleCheck, FolderOpen, GripVertical, TriangleAlert } from "lucide-react";
+import { CircleCheck, FolderOpen, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { VideoRow, type Dims, type Done, type Video } from "@/components/video-row";
 import { parseMetadata } from "@/lib/parse";
 import { scheduleSlots } from "@/lib/schedule";
 
-type Video = { name: string; path: string; created: number };
+type Visibility = "schedule" | "public" | "unlisted" | "private";
 type Saved = {
   metadata?: string;
   order?: string[];
   start?: string;
   times?: string[];
-  /** file name -> what was scheduled on YouTube, so a re-run never uploads the same file twice */
-  uploaded?: Record<string, Scheduled>;
+  visibility?: Visibility;
+  madeForKids?: boolean;
+  /** file name -> what is on YouTube, so a re-run never uploads the same file twice */
+  uploaded?: Record<string, Done>;
 };
-type Scheduled = { id: string; at: string };
-type Dims = { w: number; h: number; d: number };
 type YtStatus = { has_client: boolean; connected: boolean };
 
-// YouTube treats a video as a Short when it is vertical or square and at most 3 minutes long.
-function shortsWarning(dims?: Dims) {
-  if (!dims) return null;
-  if (dims.w > dims.h) return "Horizontal video, YouTube will not show it as a Short";
-  if (dims.d > 180) return "Longer than 3 minutes, YouTube will not show it as a Short";
-  return null;
-}
+const VISIBILITY: { value: Visibility; label: string; help: string }[] = [
+  { value: "schedule", label: "Scheduled", help: "Uploaded as private. YouTube makes each video public at its time." },
+  { value: "public", label: "Public", help: "Each video is public as soon as it finishes uploading." },
+  { value: "unlisted", label: "Unlisted", help: "Only people with the link can watch. YouTube cannot schedule unlisted videos." },
+  { value: "private", label: "Private", help: "Only you can watch until you change it in YouTube Studio." },
+];
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const toDateInput = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const tomorrow = () => toDateInput(new Date(Date.now() + 864e5));
-const fmt = new Intl.DateTimeFormat(undefined, {
-  weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+const fullFmt = new Intl.DateTimeFormat(undefined, {
+  weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
 });
+const segment = "flex-1 text-muted-foreground data-[state=on]:bg-muted data-[state=on]:font-semibold data-[state=on]:text-foreground";
 
 export default function App() {
   const [dir, setDir] = useState<string | null>(null);
@@ -43,10 +44,12 @@ export default function App() {
   const [metadata, setMetadata] = useState("");
   const [start, setStart] = useState(tomorrow);
   const [times, setTimes] = useState(["09:00"]);
+  const [visibility, setVisibility] = useState<Visibility>("schedule");
+  const [madeForKids, setMadeForKids] = useState(false);
+  const [uploaded, setUploaded] = useState<Record<string, Done>>({});
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [dropTarget, setDropTarget] = useState<number | null>(null);
-  const [uploaded, setUploaded] = useState<Record<string, Scheduled>>({});
   const [dims, setDims] = useState<Record<string, Dims>>({});
   const [yt, setYt] = useState<YtStatus>({ has_client: false, connected: false });
   const [connecting, setConnecting] = useState(false);
@@ -54,6 +57,7 @@ export default function App() {
   const [progress, setProgress] = useState<{ name: string; pct: number } | null>(null);
   const dragFrom = useRef<number | null>(null);
   const txtInput = useRef<HTMLInputElement>(null);
+  const connectAttempt = useRef(0);
 
   async function openDir(path: string) {
     setLoaded(false);
@@ -75,6 +79,8 @@ export default function App() {
       setMetadata(saved.metadata ?? "");
       setStart(saved.start ?? tomorrow());
       setTimes(saved.times?.length ? saved.times : ["09:00"]);
+      setVisibility(saved.visibility ?? "schedule");
+      setMadeForKids(saved.madeForKids ?? false);
       setUploaded(saved.uploaded ?? {});
       setLoaded(true);
     } catch (e) {
@@ -87,6 +93,10 @@ export default function App() {
     if (typeof picked === "string") openDir(picked);
   }
 
+  async function refreshYt() {
+    setYt(await invoke<YtStatus>("youtube_status"));
+  }
+
   useEffect(() => {
     invoke<string | null>("start_dir").then((d) => {
       if (d) openDir(d);
@@ -96,47 +106,35 @@ export default function App() {
 
   useEffect(() => {
     if (!dir || !loaded) return;
-    const state: Saved = { metadata, order: videos.map((v) => v.name), start, times, uploaded };
+    const state: Saved = {
+      metadata, order: videos.map((v) => v.name), start, times, visibility, madeForKids, uploaded,
+    };
     const json = JSON.stringify(state, null, 2);
     const t = setTimeout(() => {
       invoke("save_state", { dir, json }).catch((e) => setError(`Could not save .clumyoup.json: ${e}`));
     }, 300);
     return () => clearTimeout(t);
-  }, [dir, loaded, metadata, videos, start, times, uploaded]);
+  }, [dir, loaded, metadata, videos, start, times, visibility, madeForKids, uploaded]);
 
   const episodes = useMemo(() => parseMetadata(metadata), [metadata]);
   const rows = Math.max(episodes.length, videos.length);
+  const scheduling = visibility === "schedule";
   const slots = useMemo(() => scheduleSlots(rows, start, times), [rows, start, times]);
   const problemCount = episodes.filter((e) => e.problems.length).length;
-  const now = Date.now();
   const pending = videos.flatMap((v, i) => (uploaded[v.name] ? [] : [i]));
+  const now = Date.now();
 
   const blockers: string[] = [];
   if (!yt.connected) blockers.push("Connect YouTube first.");
   if (episodes.length !== videos.length) blockers.push("Every video needs exactly one episode.");
   if (problemCount) blockers.push("Fix the episodes marked in red.");
-  if (pending.some((i) => !slots[i] || slots[i]!.getTime() <= now)) blockers.push("Every publish time must be in the future.");
-  if (videos.length && !pending.length) blockers.push("Every video in this folder is already scheduled.");
-
-  async function refreshYt() {
-    setYt(await invoke<YtStatus>("youtube_status"));
+  if (scheduling && pending.some((i) => !slots[i] || slots[i]!.getTime() <= now)) {
+    blockers.push("Every publish time must be in the future.");
   }
-
-  async function addClientSecret() {
-    const path = await open({ filters: [{ name: "Google OAuth client", extensions: ["json"] }] });
-    if (typeof path !== "string") return;
-    try {
-      await invoke("set_client_secret", { path });
-      setError("");
-    } catch (e) {
-      setError(String(e));
-    }
-    refreshYt();
-  }
+  if (videos.length && !pending.length) blockers.push("Every video in this folder is already on YouTube.");
 
   // If Google blocks sign-in on its own page the browser never comes back, so a retry starts a
   // fresh attempt and the abandoned one (which times out by itself) is ignored.
-  const connectAttempt = useRef(0);
   async function connect() {
     const attempt = ++connectAttempt.current;
     setConnecting(true);
@@ -151,6 +149,18 @@ export default function App() {
     }
   }
 
+  async function addClientSecret() {
+    const path = await open({ filters: [{ name: "Google OAuth client", extensions: ["json"] }] });
+    if (typeof path !== "string") return;
+    try {
+      await invoke("set_client_secret", { path });
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
+    refreshYt();
+  }
+
   async function disconnect() {
     await invoke("disconnect").catch((e) => setError(String(e)));
     refreshYt();
@@ -159,12 +169,13 @@ export default function App() {
   async function uploadAll() {
     setUploading(true);
     setError("");
+    const privacy = scheduling ? "private" : visibility;
     try {
       for (const i of pending) {
         const video = videos[i];
         const ep = episodes[i];
-        const slot = slots[i]!;
-        if (slot.getTime() <= Date.now()) throw new Error(`Ep ${ep.ep}'s publish time has already passed.`);
+        const at = scheduling ? slots[i]! : null;
+        if (at && at.getTime() <= Date.now()) throw new Error(`Episode ${ep.ep}'s publish time has already passed.`);
         setProgress({ name: video.name, pct: 0 });
         const onProgress = new Channel<number>();
         onProgress.onmessage = (pct) => setProgress({ name: video.name, pct });
@@ -172,10 +183,12 @@ export default function App() {
           path: video.path,
           title: ep.title,
           description: ep.description,
-          publishAt: slot.toISOString(),
+          privacy,
+          madeForKids,
+          publishAt: at?.toISOString() ?? null,
           onProgress,
         });
-        setUploaded((u) => ({ ...u, [video.name]: { id, at: slot.toISOString() } }));
+        setUploaded((u) => ({ ...u, [video.name]: { id, privacy, at: at?.toISOString() } }));
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -187,7 +200,7 @@ export default function App() {
     }
   }
 
-  // Scheduled videos keep their title on YouTube, so they stay on their row.
+  // Videos already on YouTube keep their title there, so they stay on their row.
   const locked = (i: number) => uploading || !videos[i] || !!uploaded[videos[i].name];
 
   function swap(a: number, b: number) {
@@ -208,26 +221,34 @@ export default function App() {
   if (!dir) {
     return (
       <main className="flex h-screen flex-col items-center justify-center gap-4 p-8 text-center">
-        <h1 className="text-xl font-semibold">Open a folder of videos</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Open a folder of videos</h1>
         <p className="max-w-sm text-sm text-muted-foreground">
-          Or run <code className="rounded bg-muted px-1.5 py-0.5">clumyoup .</code> inside the folder from a terminal.
+          Or run <code className="rounded bg-muted px-1.5 py-0.5 text-foreground">clumyoup .</code> inside the
+          folder from a terminal.
         </p>
         <Button size="lg" onClick={pickDir}>
           <FolderOpen /> Open folder
         </Button>
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       </main>
     );
   }
 
-  const lastSlot = slots[slots.length - 1];
-  const days = Math.ceil(rows / times.length);
+  // One group per publish day when scheduling, otherwise a single list in upload order.
+  const perGroup = scheduling ? times.length : Math.max(rows, 1);
+  const groups = Array.from({ length: Math.ceil(rows / perGroup) }, (_, g) =>
+    Array.from({ length: Math.min(perGroup, rows - g * perGroup) }, (_, k) => g * perGroup + k),
+  );
+  const lastSlot = slots[rows - 1];
+  const action = scheduling ? "Schedule" : `Upload as ${visibility}:`;
+  const count = `${pending.length} ${pending.length === 1 ? "video" : "videos"}`;
+  const done = videos.length - pending.length;
 
   return (
     <div className="flex h-screen flex-col">
-      <header className="flex items-center gap-3 border-b px-4 py-2.5">
+      <header className="flex items-center gap-3 border-b px-5 py-3">
         <div className="min-w-0 flex-1">
-          <h1 className="truncate font-semibold">{dir.split(/[\\/]/).pop()}</h1>
+          <h1 className="truncate text-lg font-semibold tracking-tight">{dir.split(/[\\/]/).pop()}</h1>
           <p className="truncate text-xs text-muted-foreground">{dir}</p>
         </div>
         {!yt.has_client ? (
@@ -235,12 +256,10 @@ export default function App() {
         ) : !yt.connected ? (
           <>
             {connecting && <span className="text-sm text-muted-foreground">Finish signing in in your browser.</span>}
-            <Button variant="outline" onClick={connect}>
-              {connecting ? "Try again" : "Connect YouTube"}
-            </Button>
+            <Button variant="outline" onClick={connect}>{connecting ? "Try again" : "Connect YouTube"}</Button>
           </>
         ) : (
-          <span className="flex items-center gap-1 text-sm text-muted-foreground">
+          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <CircleCheck className="size-4 text-green-600 dark:text-green-500" /> YouTube connected
             <Button variant="ghost" size="sm" onClick={disconnect} disabled={uploading}>Disconnect</Button>
           </span>
@@ -249,216 +268,208 @@ export default function App() {
           <FolderOpen /> Open folder
         </Button>
       </header>
-      {error && <p className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p>}
+      {error && (
+        <p role="alert" className="border-b bg-destructive/10 px-5 py-2 text-sm text-destructive">{error}</p>
+      )}
 
-      <div className="grid min-h-0 flex-1 grid-cols-[360px_1fr]">
-        <aside className="flex flex-col overflow-y-auto border-r">
-          <fieldset disabled={uploading} className="flex-1 space-y-6 p-4">
-          <section className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label htmlFor="metadata" className="text-sm font-medium">Titles and descriptions</label>
-              <Button variant="ghost" size="sm" onClick={() => txtInput.current?.click()}>Load .txt</Button>
-              <input
-                ref={txtInput}
-                type="file"
-                accept=".txt,text/plain"
-                hidden
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (file) setMetadata(await file.text());
-                  e.target.value = "";
-                }}
+      <div className="grid min-h-0 flex-1 grid-cols-[340px_1fr]">
+        <aside className="flex min-h-0 flex-col border-r bg-muted/30">
+          <fieldset disabled={uploading} className="min-h-0 flex-1 space-y-7 overflow-y-auto p-5">
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label htmlFor="metadata" className="font-medium">Episodes</label>
+                <Button variant="ghost" size="sm" onClick={() => txtInput.current?.click()}>Load .txt</Button>
+                <input
+                  ref={txtInput}
+                  type="file"
+                  accept=".txt,text/plain"
+                  hidden
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (file) setMetadata(await file.text());
+                    e.target.value = "";
+                  }}
+                />
+              </div>
+              <textarea
+                id="metadata"
+                value={metadata}
+                onChange={(e) => setMetadata(e.target.value)}
+                placeholder={"Ep 1\nTitle\n===\nDescription\n\nEp 2\n..."}
+                spellCheck={false}
+                className="h-44 w-full resize-y rounded-lg border border-input bg-background p-2.5 font-mono text-xs leading-relaxed outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
               />
-            </div>
-            <textarea
-              id="metadata"
-              value={metadata}
-              onChange={(e) => setMetadata(e.target.value)}
-              placeholder={"Ep 1\nTitle\n===\nDescription\n\nEp 2\n..."}
-              spellCheck={false}
-              className="h-72 w-full resize-y rounded-lg border border-input bg-transparent p-2.5 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
-            />
-            <p className="text-xs text-muted-foreground">
-              {episodes.length} episodes
-              {problemCount > 0 && <span className="text-destructive"> · {problemCount} need fixing</span>}
-            </p>
-          </section>
-
-          <section className="space-y-3">
-            <h2 className="text-sm font-medium">Schedule</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="space-y-1 text-xs text-muted-foreground">
-                First day
-                <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Videos per day
-                <Input type="number" min={1} max={24} value={times.length} onChange={(e) => setPerDay(+e.target.value)} />
-              </label>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {times.map((t, i) => (
-                <label key={i} className="space-y-1 text-xs text-muted-foreground">
-                  Video {i + 1} of the day
-                  <Input
-                    type="time"
-                    value={t}
-                    onChange={(e) => setTimes((ts) => ts.map((x, j) => (j === i ? e.target.value : x)))}
-                  />
-                </label>
-              ))}
-            </div>
-            {rows > 0 && lastSlot && (
               <p className="text-xs text-muted-foreground">
-                {rows} videos over {days} {days === 1 ? "day" : "days"}, last one {fmt.format(lastSlot)}.
+                {episodes.length} {episodes.length === 1 ? "episode" : "episodes"} found
+                {problemCount > 0 && <span className="text-destructive">, {problemCount} need fixing</span>}
               </p>
+            </section>
+
+            <section className="space-y-2">
+              <h2 id="visibility" className="font-medium">Visibility</h2>
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                spacing={0}
+                value={visibility}
+                onValueChange={(v) => v && setVisibility(v as Visibility)}
+                aria-labelledby="visibility"
+                className="w-full bg-background"
+              >
+                {VISIBILITY.map((o) => (
+                  <ToggleGroupItem key={o.value} value={o.value} className={segment}>{o.label}</ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+              <p className="text-xs text-muted-foreground">{VISIBILITY.find((o) => o.value === visibility)!.help}</p>
+            </section>
+
+            <section className="space-y-2">
+              <h2 id="audience" className="font-medium">Audience</h2>
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                spacing={0}
+                value={madeForKids ? "kids" : "not-kids"}
+                onValueChange={(v) => v && setMadeForKids(v === "kids")}
+                aria-labelledby="audience"
+                className="w-full bg-background"
+              >
+                <ToggleGroupItem value="not-kids" className={segment}>Not made for kids</ToggleGroupItem>
+                <ToggleGroupItem value="kids" className={segment}>Made for kids</ToggleGroupItem>
+              </ToggleGroup>
+              {madeForKids && (
+                <p className="text-xs text-muted-foreground">
+                  YouTube turns off comments and personalized ads on videos made for kids.
+                </p>
+              )}
+            </section>
+
+            {scheduling && (
+              <section className="space-y-3">
+                <h2 className="font-medium">Schedule</h2>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    First day
+                    <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} className="bg-background" />
+                  </label>
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    Videos per day
+                    <Input
+                      type="number"
+                      min={1}
+                      max={24}
+                      value={times.length}
+                      onChange={(e) => setPerDay(+e.target.value)}
+                      className="bg-background"
+                    />
+                  </label>
+                  {times.map((t, i) => (
+                    <label key={i} className="space-y-1 text-xs text-muted-foreground">
+                      {times.length === 1 ? "Time" : `Video ${i + 1} of the day`}
+                      <Input
+                        type="time"
+                        value={t}
+                        onChange={(e) => setTimes((ts) => ts.map((x, j) => (j === i ? e.target.value : x)))}
+                        className="bg-background"
+                      />
+                    </label>
+                  ))}
+                </div>
+                {rows > 0 && lastSlot && (
+                  <p className="text-xs text-muted-foreground">
+                    {groups.length} {groups.length === 1 ? "day" : "days"}, the last video goes public{" "}
+                    {fullFmt.format(lastSlot)}.
+                  </p>
+                )}
+              </section>
             )}
-          </section>
           </fieldset>
 
-          <section className="sticky bottom-0 space-y-2 border-t bg-background p-4">
-            <Button size="lg" className="w-full" onClick={uploadAll} disabled={uploading || blockers.length > 0}>
-              {uploading
-                ? `Uploading ${videos.length - pending.length + 1} of ${videos.length}…`
-                : `Schedule ${pending.length} ${pending.length === 1 ? "video" : "videos"} on YouTube`}
+          <div className="space-y-2 border-t bg-background p-5">
+            {uploading && (
+              <p className="text-xs text-muted-foreground tabular-nums">
+                Video {done + 1} of {videos.length}. Keep the app open until it finishes.
+              </p>
+            )}
+            <Button size="lg" className="h-10 w-full" onClick={uploadAll} disabled={uploading || blockers.length > 0}>
+              {uploading ? "Uploading…" : `${action} ${count}`}
             </Button>
             {!uploading && blockers.map((b) => (
               <p key={b} className="text-xs text-muted-foreground">{b}</p>
             ))}
-          </section>
+          </div>
         </aside>
 
-        <main className="overflow-y-auto">
-          {episodes.length !== videos.length && (
-            <p className="flex items-center gap-2 border-b bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-400">
+        <main className="min-h-0 overflow-y-auto">
+          {episodes.length !== videos.length && rows > 0 && (
+            <p className="flex items-center gap-2 border-b bg-amber-500/10 px-5 py-2 text-sm text-amber-800 dark:text-amber-300">
               <TriangleAlert className="size-4 shrink-0" />
-              {episodes.length} episodes but {videos.length} videos in this folder.
+              {episodes.length} {episodes.length === 1 ? "episode" : "episodes"} but {videos.length}{" "}
+              {videos.length === 1 ? "video" : "videos"} in this folder.
             </p>
           )}
           {rows === 0 ? (
-            <p className="p-8 text-center text-sm text-muted-foreground">
-              No videos in this folder yet, and no episodes pasted.
-            </p>
+            <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+              <p className="font-medium">Nothing here yet</p>
+              <p className="max-w-sm text-sm text-muted-foreground">
+                Put your videos in this folder and paste the episode titles and descriptions on the left.
+              </p>
+            </div>
           ) : (
-            <ol>
-              {Array.from({ length: rows }, (_, i) => {
-                const ep = episodes[i];
-                const video = videos[i];
-                const done = video && uploaded[video.name];
-                const slot = done ? new Date(done.at) : slots[i];
-                const passed = !done && slot && slot.getTime() <= now;
-                const uploadingThis = progress && video?.name === progress.name;
-                const shorts = video && shortsWarning(dims[video.name]);
-                return (
-                  <li
-                    key={i}
-                    onDragOver={(e) => {
-                      if (dragFrom.current === null || locked(i)) return;
-                      e.preventDefault();
-                      setDropTarget(i);
-                    }}
-                    onDragLeave={() => setDropTarget((t) => (t === i ? null : t))}
-                    onDrop={() => {
-                      if (dragFrom.current !== null) swap(dragFrom.current, i);
-                      dragFrom.current = null;
-                      setDropTarget(null);
-                    }}
-                    className={cn(
-                      "grid grid-cols-[3rem_1fr_16rem_11rem_auto] items-center gap-4 border-b px-4 py-2",
-                      dropTarget === i && "bg-primary/10",
-                    )}
-                  >
-                    <span className="text-sm tabular-nums text-muted-foreground">{ep ? `Ep ${ep.ep}` : "–"}</span>
-
-                    <div className="min-w-0">
-                      <p className={cn("truncate text-sm", !ep?.title && "text-muted-foreground")}>
-                        {ep ? ep.title || "(no title)" : "No title for this video"}
-                      </p>
-                      {ep?.problems.map((p) => (
-                        <p key={p} className="text-xs text-destructive">{p}</p>
-                      ))}
-                      {shorts && <p className="text-xs text-amber-700 dark:text-amber-400">{shorts}</p>}
-                    </div>
-
-                    {video ? (
-                      <div
-                        draggable={!locked(i)}
-                        onDragStart={(e) => {
-                          dragFrom.current = i;
-                          e.dataTransfer.effectAllowed = "move";
-                        }}
-                        onDragEnd={() => {
-                          dragFrom.current = null;
-                          setDropTarget(null);
-                        }}
-                        className={cn(
-                          "flex items-center gap-2 rounded-lg border bg-card p-1.5",
-                          !locked(i) && "cursor-grab active:cursor-grabbing",
-                        )}
-                      >
-                        <GripVertical className={cn("size-4 shrink-0 text-muted-foreground", locked(i) && "invisible")} />
-                        <video
-                          src={`${convertFileSrc(video.path)}#t=0.1`}
-                          muted
-                          loop
-                          playsInline
-                          preload="metadata"
-                          aria-label={`Preview of ${video.name}`}
-                          onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
-                          onMouseLeave={(e) => e.currentTarget.pause()}
-                          onLoadedMetadata={(e) => {
-                            const { videoWidth: w, videoHeight: h, duration: d } = e.currentTarget;
-                            setDims((all) => ({ ...all, [video.name]: { w, h, d } }));
+            groups.map((group, g) => (
+              <section key={g} aria-label={scheduling ? `Day ${g + 1}` : "Upload order"}>
+                <h2 className="sticky top-0 z-10 flex items-baseline justify-between border-b bg-background/95 px-5 py-2 backdrop-blur">
+                  <span className="font-semibold">
+                    {scheduling ? (slots[group[0]] ? dayFmt.format(slots[group[0]]!) : `Day ${g + 1}`) : "Upload order"}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {group.length} {group.length === 1 ? "video" : "videos"}
+                  </span>
+                </h2>
+                <ol className="divide-y border-b">
+                  {group.map((i) => {
+                    const video = videos[i];
+                    return (
+                        <VideoRow
+                          key={i}
+                          ep={episodes[i]}
+                          video={video}
+                          slot={scheduling ? slots[i] : null}
+                          scheduling={scheduling}
+                          done={video && uploaded[video.name]}
+                          progress={progress && video?.name === progress.name ? progress.pct : null}
+                          dims={video && dims[video.name]}
+                          locked={locked(i)}
+                          canUp={!locked(i) && i > 0 && !locked(i - 1)}
+                          canDown={!locked(i) && i < videos.length - 1 && !locked(i + 1)}
+                          dropTarget={dropTarget === i}
+                          onUp={() => swap(i, i - 1)}
+                          onDown={() => swap(i, i + 1)}
+                          onDragStart={() => (dragFrom.current = i)}
+                          onDragEnd={() => {
+                            dragFrom.current = null;
+                            setDropTarget(null);
                           }}
-                          className="h-20 w-[45px] shrink-0 rounded bg-black object-cover"
+                          onDragOver={() => {
+                            if (dragFrom.current === null || locked(i)) return false;
+                            setDropTarget(i);
+                            return true;
+                          }}
+                          onDragLeave={() => setDropTarget((t) => (t === i ? null : t))}
+                          onDrop={() => {
+                            if (dragFrom.current !== null) swap(dragFrom.current, i);
+                            dragFrom.current = null;
+                            setDropTarget(null);
+                          }}
+                          onDims={(d) => video && setDims((all) => ({ ...all, [video.name]: d }))}
                         />
-                        <span className="min-w-0 break-all text-xs">{video.name}</span>
-                      </div>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">No video</span>
-                    )}
-
-                    <div className={cn("text-xs tabular-nums", passed ? "text-destructive" : "text-muted-foreground")}>
-                      {slot ? fmt.format(slot) : "Set a date and time"}
-                      {passed && <p>Already passed</p>}
-                      {uploadingThis && (
-                        <p className="text-foreground">Uploading {Math.floor(progress.pct * 100)}%</p>
-                      )}
-                      {done && (
-                        <button
-                          type="button"
-                          onClick={() => openUrl(`https://studio.youtube.com/video/${done.id}/edit`)}
-                          className="flex items-center gap-1 rounded text-green-700 underline-offset-2 hover:underline focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none dark:text-green-500"
-                        >
-                          <CircleCheck className="size-3.5" /> Scheduled, open in Studio
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex flex-col">
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Move ${video?.name} up`}
-                        disabled={locked(i) || i === 0 || locked(i - 1)}
-                        onClick={() => swap(i, i - 1)}
-                      >
-                        <ArrowUp />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Move ${video?.name} down`}
-                        disabled={locked(i) || i >= videos.length - 1 || locked(i + 1)}
-                        onClick={() => swap(i, i + 1)}
-                      >
-                        <ArrowDown />
-                      </Button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ol>
+                    );
+                  })}
+                </ol>
+              </section>
+            ))
           )}
         </main>
       </div>

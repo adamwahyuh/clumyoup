@@ -278,11 +278,21 @@ pub async fn upload_video(
     path: String,
     title: String,
     description: String,
-    publish_at: String,
+    privacy: String,
+    made_for_kids: bool,
+    publish_at: Option<String>,
     on_progress: Channel<f64>,
 ) -> Result<String, String> {
+    let mut status = json!({ "privacyStatus": privacy, "selfDeclaredMadeForKids": made_for_kids });
+    match (privacy.as_str(), publish_at) {
+        // YouTube only schedules private videos, which turn public at publishAt.
+        ("private", Some(at)) => status["publishAt"] = json!(at),
+        (_, Some(_)) => return Err("Only private videos can be scheduled.".into()),
+        ("public" | "unlisted" | "private", None) => {}
+        _ => return Err(format!("Unknown visibility: {privacy}")),
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        upload(&app, &path, &title, &description, &publish_at, &on_progress)
+        upload(&app, &path, &title, &description, status, &on_progress)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -293,7 +303,7 @@ fn upload(
     path: &str,
     title: &str,
     description: &str,
-    publish_at: &str,
+    status: Value,
     on_progress: &Channel<f64>,
 ) -> Result<String, String> {
     let token = access_token(app)?;
@@ -306,11 +316,7 @@ fn upload(
 
     let meta = json!({
         "snippet": { "title": title, "description": description },
-        "status": {
-            "privacyStatus": "private",
-            "publishAt": publish_at,
-            "selfDeclaredMadeForKids": false,
-        },
+        "status": status,
     });
     let res = agent()
         .post(UPLOAD_URL)

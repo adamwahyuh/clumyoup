@@ -23,7 +23,8 @@ Desktop app to bulk-schedule YouTube uploads from a folder. Opened from a termin
 3. Jadwal: tanggal mulai, N video per hari, N jam (`src/lib/schedule.ts`), zona waktu lokal komputer.
 4. State per folder disimpan di `<folder>/.clumyoup.json` (metadata, urutan nama file, jadwal, `uploaded`: nama file -> video ID + waktu publish). Video yang sudah ter-upload dikunci di barisnya dan tidak di-upload ulang.
 5. Upload (`src-tauri/src/youtube.rs`): pengguna memilih `client_secret.json` (OAuth client tipe Desktop) yang disalin ke folder data app. Login lewat browser (loopback + PKCE, scope `youtube.upload`), refresh token di `token.json` (mode 600). Upload resumable per 8 MiB; kalau koneksi putus, tanya posisi ke YouTube lalu lanjut. Error kuota diawali `QUOTA:`, dan UI berhenti dengan pesan "lanjut besok".
-6. Shorts: tidak ada flag di API. App memberi peringatan kalau video horizontal atau lebih dari 3 menit.
+6. Visibilitas per folder: Scheduled (private + `publishAt`, otomatis public), Public, Unlisted, Private. API YouTube hanya bisa menjadwalkan video private. Made for kids juga per folder.
+7. Shorts: tidak ada flag di API. App memberi peringatan kalau video horizontal atau lebih dari 3 menit.
 
 ## Rencana
 

@@ -25,3 +25,7 @@ dist-ssr
 
 # Session handoff notes (local only)
 checkpoint/
+
+# Per-folder state the app writes when opened on a folder
+.clumyoup.json
+.clumyoup.json.tmp
